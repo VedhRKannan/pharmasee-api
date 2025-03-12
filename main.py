@@ -1,4 +1,3 @@
-# api/predict_smiles.py
 from http.server import BaseHTTPRequestHandler
 import json
 import joblib
