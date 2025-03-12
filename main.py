@@ -20,7 +20,7 @@ app = Flask(__name__)
 
 # ✅ Load models at startup
 models = {}
-model_names = ["lip", "sol"]
+model_names = ["lipophilicity (logD)", "solubility (logS)"]
 
 try:
     for name in model_names:
