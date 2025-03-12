@@ -1,44 +1,78 @@
-from http.server import BaseHTTPRequestHandler
-import json
+from flask import Flask, request, jsonify
 import joblib
 import numpy as np
-import warnings
-
+import os
+import logging
 from rdkit import Chem
 from rdkit.Chem import AllChem
 from rdkit import DataStructs
 from rdkit import RDLogger
 
-# Disable RDKit warnings
+# Suppress RDKit warnings
 RDLogger.DisableLog("rdApp.*")
-warnings.filterwarnings("ignore")
 
-# -----------------------
-# Load your models here
-# -----------------------
-names = ["lip", "sol"]
-loaded_models = {}
-for name in names:
-    loaded_models[name] = joblib.load(f"saved_models/{name}.pkl")
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# ✅ Create the Flask app
+app = Flask(__name__)
+
+# ✅ Load models at startup
+models = {}
+model_names = ["lip", "sol"]
+
+try:
+    for name in model_names:
+        model_path = os.path.join("saved_models", f"{name}.pkl")
+        models[name] = joblib.load(model_path)
+    logger.info("✅ Models loaded successfully.")
+except Exception as e:
+    logger.error(f"❌ Failed to load models: {e}")
 
 def mol_to_fp(smiles, radius=2, nBits=1024):
-    """Convert SMILES to Morgan fingerprint as a numpy array."""
+    """Convert SMILES to a Morgan fingerprint (as a numpy array)."""
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:
-        # Return a zero fingerprint if invalid
-        return np.zeros(nBits, dtype=int)
+        return np.zeros(nBits, dtype=int)  # Return zero array if invalid SMILES
     fp = AllChem.GetMorganFingerprintAsBitVect(mol, radius, nBits=nBits)
     arr = np.zeros((nBits,), dtype=int)
     DataStructs.ConvertToNumpyArray(fp, arr)
     return arr
 
-from http.server import BaseHTTPRequestHandler
-import json
+# ✅ Health check route
+@app.route("/", methods=["GET"])
+def home():
+    return jsonify({"message": "Pharmasee API is running!"})
 
-class handler(BaseHTTPRequestHandler):
-    def do_POST(self):
-        # parse JSON, do something, return JSON
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(json.dumps({"hello": "world"}).encode())
+# ✅ Prediction route
+@app.route("/predict", methods=["POST"])
+def predict():
+    try:
+        # Parse the JSON request
+        data = request.get_json(force=True)
+        smiles = data.get("smiles", "")
+
+        if not smiles:
+            return jsonify({"error": "No SMILES provided"}), 400
+
+        # Validate SMILES
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            return jsonify({"error": "Invalid SMILES format"}), 400
+
+        # Generate predictions
+        predictions = {}
+        for name, model in models.items():
+            fp = mol_to_fp(smiles)
+            predictions[name] = float(model.predict([fp])[0])
+
+        return jsonify(predictions)
+
+    except Exception as e:
+        logger.error(f"❌ Error processing prediction: {e}")
+        return jsonify({"error": str(e)}), 500
+
+# ✅ Required for local testing
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)

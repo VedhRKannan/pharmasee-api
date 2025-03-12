@@ -4,3 +4,4 @@ rdkit
 gunicorn
 xgboost
 scikit-learn
+Flask
