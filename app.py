@@ -7,6 +7,9 @@ from rdkit import Chem
 from rdkit.Chem import AllChem
 from rdkit import DataStructs
 from rdkit import RDLogger
+from flask_cors import CORS
+
+CORS(app, origins="*")
 
 # Suppress RDKit warnings
 RDLogger.DisableLog("rdApp.*")
