@@ -7,9 +7,9 @@ from rdkit import Chem
 from rdkit.Chem import AllChem
 from rdkit import DataStructs
 from rdkit import RDLogger
-from flask_cors import CORS
 
-CORS(app, origins="*")
+
+
 
 # Suppress RDKit warnings
 RDLogger.DisableLog("rdApp.*")
@@ -22,8 +22,6 @@ logger = logging.getLogger(__name__)
 
 # ✅ Create the Flask app
 app = Flask(__name__)
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
 
 
 # ✅ Load models at startup
@@ -81,6 +79,6 @@ def predict():
         logger.error(f"❌ Error processing prediction: {e}")
         return jsonify({"error": str(e)}), 500
 
-# ✅ Required for local testing
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
