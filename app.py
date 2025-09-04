@@ -169,10 +169,10 @@ def ensure_receptor_prepared_vina(ligand_resn=None):
     if not os.path.exists(REC_PDBQT):
         _run([
     "mk_prepare_receptor.py",
-    "--read_pdb", REC_PDB,          # read plain PDB/ENT (no ProDy/MMCIF)
-    "-p", REC_PDBQT,                # write PDBQT to this exact filename
+    "--read_pdb", REC_PDB,          # read PDB/ENT directly
+    "-p", REC_PDBQT,                # write receptor PDBQT to this file
     "--delete_residues", "HOH,WAT", # strip waters
-    "-a"                            # allow missing residues/altloc issues
+    "-a"                            # allow missing bits
 ])
     if have_ref and not os.path.exists(REF_LIG_PDBQT):
         _run(["mk_prepare_ligand.py", "-i", REF_LIG_PDB, "-o", REF_LIG_PDBQT])
