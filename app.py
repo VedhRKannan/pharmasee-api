@@ -99,16 +99,42 @@ def _run(cmd, cwd=None):
         raise RuntimeError(f"Command failed ({res.returncode}): {' '.join(cmd)}\n{res.stdout}")
     return res.stdout
 
-def _download_file(url, dest):
-    # robust download with timeout
-    logger.info("Downloading %s -> %s", url, dest)
-    with urllib.request.urlopen(url, timeout=60) as resp, open(dest, "wb") as out:
-        out.write(resp.read())
+def _try_download(urls, dest):
+    last_err = None
+    for url in urls:
+        try:
+            logger.info("Downloading %s -> %s", url, dest)
+            with urllib.request.urlopen(url, timeout=60) as resp, open(dest, "wb") as out:
+                out.write(resp.read())
+            return True
+        except Exception as e:
+            last_err = e
+            logger.warning("Download failed from %s: %s", url, e)
+    if last_err:
+        raise last_err
+    return False
 
 def ensure_receptor_prepared_vina():
-    # 1) Download ligand-bound hERG (8ZYP) once
+    """
+    Ensure we have a receptor PDB file with a co-crystal ligand for autoboxing.
+    Try 8ZYP first (E-4031-bound; may be mmCIF-only at RCSB, PDBe .ent works),
+    then fall back to 5VA1 (apo; we will error if no ligand is present).
+    """
+    # 1) Download receptor file once (prefer 8ZYP)
     if not os.path.exists(REC_PDB):
-        _download_file("https://files.rcsb.org/download/8ZYP.pdb", REC_PDB)
+        # Try multiple sources / formats for 8ZYP
+        try:
+            _try_download([
+                # RCSB legacy PDB often missing → 404
+                "https://files.rcsb.org/download/8ZYP.pdb",
+                # PDBe legacy-format .ent (works even when .pdb missing)
+                "https://www.ebi.ac.uk/pdbe/entry-files/download/pdb8zyp.ent",
+                # Fallback to 5VA1 (older hERG cryo-EM)
+                "https://files.rcsb.org/download/5VA1.pdb",
+                "https://www.ebi.ac.uk/pdbe/entry-files/download/pdb5va1.ent",
+            ], REC_PDB)
+        except Exception as e:
+            raise RuntimeError(f"Failed to download receptor (8ZYP/5VA1): {e}")
 
     # 2) Extract largest non-water HET as autobox reference
     if not os.path.exists(REF_LIG_PDB):
@@ -118,11 +144,19 @@ def ensure_receptor_prepared_vina():
                 if not ln.startswith("HETATM"):
                     continue
                 resn = ln[17:20].strip()
-                if resn in ("HOH", "WAT", "NA", "K", "CL", "ZN", "MG"):
+                if resn in ("HOH","WAT","NA","K","CL","ZN","MG"):
                     continue
                 het_by_res.setdefault(resn, []).append(ln)
+
         if not het_by_res:
-            raise RuntimeError("No hetero ligand found in 8ZYP for autoboxing.")
+            # If the receptor file has no ligand (e.g., apo 5VA1), we can’t autobox on a ligand
+            # → tell the client clearly so you can choose a fixed box or switch to GNINA later.
+            raise RuntimeError(
+                "No hetero ligand found in receptor file for autoboxing "
+                "(8ZYP/5VA1). Use a receptor with a bound blocker or switch to "
+                "a fixed box (center/size) strategy."
+            )
+
         resn_max = max(het_by_res, key=lambda k: len(het_by_res[k]))
         with open(REF_LIG_PDB, "w") as out:
             out.writelines(het_by_res[resn_max])
@@ -133,6 +167,7 @@ def ensure_receptor_prepared_vina():
         _run(["mk_prepare_receptor.py", "-i", REC_PDB, "-o", REC_PDBQT, "-U", "waters"])
     if not os.path.exists(REF_LIG_PDBQT):
         _run(["mk_prepare_ligand.py", "-i", REF_LIG_PDB, "-o", REF_LIG_PDBQT])
+
 
 def smiles_to_rdkit_3d_min(smiles: str):
     mol = Chem.MolFromSmiles(smiles)
@@ -173,6 +208,8 @@ def herg_vina():
             return jsonify({"error": f"Dependency missing: {', '.join(missing)} not found in PATH"}), 500
 
         ensure_receptor_prepared_vina()
+        logger.info("Receptor in use: %s", REC_PDB)
+
 
         lig3d = smiles_to_rdkit_3d_min(smiles)
         if lig3d is None:
