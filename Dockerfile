@@ -1,25 +1,18 @@
 FROM python:3.11-slim
 
-# install dependencies
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    git wget curl \
-    libeigen3-dev \
-    openbabel \
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1
+
+# Install system deps needed for RDKit to run
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1 \
  && rm -rf /var/lib/apt/lists/*
 
-# clone and build smina from source
-RUN git clone https://github.com/mwojcikowski/smina.git /opt/smina \
- && cd /opt/smina \
- && mkdir build && cd build \
- && cmake .. \
- && make -j$(nproc) \
- && cp smina /usr/local/bin/smina
-
-# python deps
+# Install Python deps
 RUN pip install flask rdkit-pypi joblib numpy biopython
 
 WORKDIR /app
 COPY . /app
 
+EXPOSE 8080
 CMD ["python", "app.py"]

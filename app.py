@@ -296,7 +296,81 @@ def herg_debug():
     }
     return jsonify(deps)
 
+
+# ==== Simple RDKit-only hERG demo scorer (no external tools) ==================
+from rdkit.Chem import Crippen, Descriptors
+from rdkit import DataStructs
+
+HERG_BLOCKERS = [
+    ("Dofetilide",  "COc1cc(ccc1OCCN(CCN(C)C)C)c2ccc(F)cc2"),
+    ("Terfenadine", "CC(C)(C)OC(C1=CC=CC=C1)C(O)(C2=CC=CC=C2)CCN(C)C"),
+    ("Astemizole",  "COCCOc1ccc(cc1)C(CN(C)CCC2=NC3=CC=CC=C3N2C)=NC4=CC=CC=C4"),
+    ("Cisapride",   "CCN(CC)CCOC(=O)C1=CC=CC(=C1)C(=O)NCCOC2=CC=CC=C2Cl"),
+]
+
+def fp_morgan(smiles, radius=2, nBits=2048):
+    m = Chem.MolFromSmiles(smiles)
+    if m is None:
+        return None
+    return AllChem.GetMorganFingerprintAsBitVect(m, radius, nBits=nBits)
+
+@app.route("/herg_demo", methods=["POST"])
+def herg_demo():
+    """
+    Body: { "smiles": "..." }
+    Returns: {
+      "ok": true,
+      "logP": <float>,
+      "best_ref": {"name": str, "smiles": str, "tanimoto": float},
+      "similarities": [ {name, tanimoto}... ],
+      "affinity_demo_kcal_mol": <float>   # purely demo: -5 - 4*best_sim
+    }
+    """
+    try:
+        data = request.get_json(force=True) or {}
+        smiles = (data.get("smiles") or "").strip()
+        if not smiles:
+            return jsonify({"error":"No SMILES provided"}), 400
+
+        qfp = fp_morgan(smiles)
+        if qfp is None:
+            return jsonify({"error":"Invalid SMILES"}), 400
+
+        sims = []
+        best = {"name": None, "smiles": None, "tanimoto": 0.0}
+        for name, s in HERG_BLOCKERS:
+            bfp = fp_morgan(s)
+            if bfp is None:
+                continue
+            tan = DataStructs.TanimotoSimilarity(qfp, bfp)
+            sims.append({"name": name, "tanimoto": tan})
+            if tan > best["tanimoto"]:
+                best = {"name": name, "smiles": s, "tanimoto": tan}
+
+        # RDKit Crippen logP
+        mol = Chem.MolFromSmiles(smiles)
+        logP = float(Crippen.MolLogP(mol))
+
+        # demo affinity: deterministic from similarity (looks like kcal/mol)
+        affinity_demo = float(-5.0 - 4.0 * best["tanimoto"])
+
+        return jsonify({
+            "ok": True,
+            "logP": logP,
+            "best_ref": best,
+            "similarities": sims,
+            "affinity_demo_kcal_mol": affinity_demo
+        })
+
+    except Exception as e:
+        logger.exception("herg_demo error")
+        return jsonify({"error": str(e)}), 500
+
+
+
+
 # ──────────────────────────────────────────────────────────────────────────────
+
 # Entrypoint
 # ──────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
