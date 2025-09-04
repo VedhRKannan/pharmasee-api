@@ -6,5 +6,4 @@ xgboost
 scikit-learn
 Flask
 flask-cors
-meeko==0.5.3
 biopython==1.84
