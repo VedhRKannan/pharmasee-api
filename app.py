@@ -79,126 +79,151 @@ def predict():
 
 
 
-# ==== hERG template-fit scorer (RDKit only) ==================================
-import urllib.request, tempfile, base64
+# ==== hERG docking via SMINA (Vina) ==========================================
+# Drop this anywhere above: if __name__ == "__main__":
+import subprocess, tempfile, base64, urllib.request
 
-HERG_ASSETS = os.path.abspath("./herg_assets")
-os.makedirs(HERG_ASSETS, exist_ok=True)
-HERG_PDB = os.path.join(HERG_ASSETS, "8ZYP.pdb")
-TEMPLATE_SDF = os.path.join(HERG_ASSETS, "template_ligand.sdf")
+DOCK_VINA_ROOT = os.path.abspath("./herg_vina_assets")
+os.makedirs(DOCK_VINA_ROOT, exist_ok=True)
+REC_PDB      = os.path.join(DOCK_VINA_ROOT, "8ZYP.pdb")
+REC_PDBQT    = os.path.join(DOCK_VINA_ROOT, "herg_rec.pdbqt")
+REF_LIG_PDB  = os.path.join(DOCK_VINA_ROOT, "ref_ligand.pdb")
+REF_LIG_PDBQT= os.path.join(DOCK_VINA_ROOT, "ref_ligand.pdbqt")
 
-def _download_8ZYP():
-    if not os.path.exists(HERG_PDB):
-        urllib.request.urlretrieve("https://files.rcsb.org/download/8ZYP.pdb", HERG_PDB)
+def _run(cmd, cwd=None):
+    logger.info("RUN: %s", " ".join(cmd))
+    res = subprocess.run(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    if res.returncode != 0:
+        raise RuntimeError(f"Command failed ({res.returncode}): {' '.join(cmd)}\n{res.stdout}")
+    return res.stdout
 
-def _extract_template_sdf():
-    """
-    Extract the largest non-water HET group from 8ZYP and save as SDF for use as template ligand.
-    RCSB PDB files include CONECT records so RDKit can perceive bonds.
-    """
-    if os.path.exists(TEMPLATE_SDF):
-        return
-    _download_8ZYP()
-    with open(HERG_PDB, "r") as f:
-        pdb = f.read()
-    # keep only HETATM + matching CONECT for largest HET group
-    lines = [ln for ln in pdb.splitlines() if ln.startswith(("HETATM","CONECT","END"))]
-    # group HETATMs by residue name+id
-    groups = {}
-    for ln in lines:
-        if ln.startswith("HETATM"):
-            resn = ln[17:20].strip()
-            resid = ln[22:26].strip()
-            key = f"{resn}:{resid}"
-            groups.setdefault(key, []).append(ln)
-    if not groups:
-        raise RuntimeError("No hetero ligand found in 8ZYP.")
-    key = max(groups, key=lambda k: len(groups[k]))
-    het_lines = groups[key]
-    # collect atom serials for CONECT
-    atom_ids = set(int(ln[6:11]) for ln in het_lines)
-    conect = [ln for ln in lines if ln.startswith("CONECT") and int(ln[6:11]) in atom_ids]
-    pdb_block = "\n".join(het_lines + conect) + "\nEND\n"
+def ensure_receptor_prepared_vina():
+    # 1) Download ligand-bound hERG (8ZYP) once
+    if not os.path.exists(REC_PDB):
+        urllib.request.urlretrieve("https://files.rcsb.org/download/8ZYP.pdb", REC_PDB)
 
-    # Build RDKit mol from PDB and write SDF
-    tmpl = Chem.MolFromPDBBlock(pdb_block, removeHs=False, sanitize=True)
-    if tmpl is None:
-        raise RuntimeError("Failed to parse template ligand from 8ZYP.")
-    # ensure a conformer exists
-    if tmpl.GetNumConformers() == 0:
-        AllChem.EmbedMolecule(tmpl, AllChem.ETKDGv3())
-    w = Chem.SDWriter(TEMPLATE_SDF); w.write(tmpl); w.close()
+    # 2) Extract largest non-water HET as autobox reference
+    if not os.path.exists(REF_LIG_PDB):
+        het_by_res = {}
+        with open(REC_PDB) as f:
+            for ln in f:
+                if not ln.startswith("HETATM"): continue
+                resn = ln[17:20].strip()
+                if resn in ("HOH","WAT","NA","K","CL","ZN","MG"): continue
+                het_by_res.setdefault(resn, []).append(ln)
+        if not het_by_res:
+            raise RuntimeError("No hetero ligand found in 8ZYP.")
+        resn_max = max(het_by_res, key=lambda k: len(het_by_res[k]))
+        with open(REF_LIG_PDB, "w") as out:
+            out.writelines(het_by_res[resn_max])
 
-def _load_template_mol():
-    _extract_template_sdf()
-    suppl = Chem.SDMolSupplier(TEMPLATE_SDF, removeHs=False)
-    mol = next((m for m in suppl if m is not None), None)
-    if mol is None:
-        raise RuntimeError("Template SDF could not be loaded.")
-    return mol
+    # 3) Prepare receptor & ref ligand to PDBQT (Meeko CLIs)
+    if not os.path.exists(REC_PDBQT):
+        _run(["mk_prepare_receptor.py", "-i", REC_PDB, "-o", REC_PDBQT, "-U", "waters"])
+    if not os.path.exists(REF_LIG_PDBQT):
+        _run(["mk_prepare_ligand.py", "-i", REF_LIG_PDB, "-o", REF_LIG_PDBQT])
 
-def _build_query_3d(smiles: str):
+def smiles_to_rdkit_3d_min(smiles: str):
     mol = Chem.MolFromSmiles(smiles)
     if mol is None: return None
     mol = Chem.AddHs(mol)
-    params = AllChem.ETKDGv3()
-    params.randomSeed = 0xC0FFEE
-    # try multiple conformers and keep the best after a fast UFF minimize
-    nconf = 10
-    ids = AllChem.EmbedMultipleConfs(mol, numConfs=nconf, params=params)
-    energies = []
-    for cid in ids:
-        AllChem.UFFOptimizeMolecule(mol, confId=cid, maxIters=200)
-        e = AllChem.UFFGetMoleculeForceField(mol, confId=cid).CalcEnergy()
-        energies.append((e, cid))
-    energies.sort()
-    # keep lowest-energy conformer only
-    best = energies[0][1]
-    # drop others
-    conf = mol.GetConformer(best)
-    newmol = Chem.Mol(mol)
-    newmol.RemoveAllConformers()
-    newmol.AddConformer(conf, assignId=True)
-    return newmol
+    params = AllChem.ETKDGv3(); params.randomSeed = 0xC0FFEE
+    if AllChem.EmbedMolecule(mol, params) != 0:
+        return None
+    AllChem.UFFOptimizeMolecule(mol, maxIters=500)
+    return mol
 
-@app.route("/herg_quickscore", methods=["POST"])
-def herg_quickscore():
+def rdkit_to_pdbqt_meeko(mol, out_path):
+    from rdkit.Chem import SDWriter
+    tmp_sdf = out_path + ".sdf"
+    w = SDWriter(tmp_sdf); w.write(mol); w.close()
+    _run(["mk_prepare_ligand.py", "-i", tmp_sdf, "-o", out_path])
+    os.remove(tmp_sdf)
+
+@app.route("/herg_vina", methods=["POST"])
+def herg_vina():
     """
-    Body: { "smiles": "..." }
-    Returns: { shape_tanimoto, aligned_pose_sdf_b64, template: "8ZYP ligand" }
+    Body: { "smiles": "...", "exhaustiveness": 8, "num_modes": 9 }
+    Returns: { vina_affinity_kcal_mol, poses_sdf_b64, modes_returned, box: {...} }
     """
     try:
         data = request.get_json(force=True) or {}
         smiles = (data.get("smiles") or "").strip()
+        ex     = str(data.get("exhaustiveness") or "8")
+        modes  = str(data.get("num_modes") or "9")
         if not smiles:
             return jsonify({"error":"No SMILES provided"}), 400
 
-        template = _load_template_mol()
-        query = _build_query_3d(smiles)
-        if query is None:
-            return jsonify({"error":"Invalid SMILES or failed 3D build"}), 400
+        ensure_receptor_prepared_vina()
 
-        # Open3DAlign (MMFF types) then compute shape Tanimoto
-        o3a = AllChem.GetO3A(query, template, prbCid=0, refCid=0, atomMap=None)
-        o3a.Align()
-        # Shape Tanimoto (0 = no overlap, 1 = identical shape)
-        from rdShapeHelpers import ShapeTanimotoDist
-        dist = ShapeTanimotoDist(query, 0, template, 0)  # distance in [0..1]
-        shape_tanimoto = 1.0 - float(dist)
+        lig3d = smiles_to_rdkit_3d_min(smiles)
+        if lig3d is None:
+            return jsonify({"error":"Failed to build 3D for SMILES"}), 400
 
-        # Export aligned pose SDF
-        sdf = Chem.MolToMolBlock(query, confId=0)
-        sdf_b64 = base64.b64encode(sdf.encode("utf-8")).decode("ascii")
+        with tempfile.TemporaryDirectory() as td:
+            lig_pdbqt = os.path.join(td, "ligand.pdbqt")
+            rdkit_to_pdbqt_meeko(lig3d, lig_pdbqt)
+            out_sdf   = os.path.join(td, "out.sdf")
+            log_txt   = os.path.join(td, "smina.log")
 
-        return jsonify({
-            "shape_tanimoto": shape_tanimoto,
-            "aligned_pose_sdf_b64": sdf_b64,
-            "template": "hERG 8ZYP co-crystal ligand (E-4031)"
-        })
+            # Use smina with autobox around co-crystal ligand
+            cmd = [
+                "smina",
+                "--receptor", REC_PDBQT,
+                "--ligand", lig_pdbqt,
+                "--autobox_ligand", REF_LIG_PDBQT,
+                "--exhaustiveness", ex,
+                "--num_modes", modes,
+                "--seed", "0",
+                "--out", out_sdf,
+                "--log", log_txt
+            ]
+            _run(cmd)
+
+            from rdkit.Chem import SDMolSupplier
+            suppl = SDMolSupplier(out_sdf, removeHs=False)
+            poses = [m for m in suppl if m is not None]
+            if not poses:
+                return jsonify({"error":"Docking produced no poses"}), 500
+
+            # Best (first) pose affinity is stored as property "minimizedAffinity" by smina
+            top = poses[0]
+            vina_aff = None
+            try:
+                vina_aff = float(top.GetProp("minimizedAffinity"))
+            except Exception:
+                try:
+                    vina_aff = float(top.GetProp("affinity"))
+                except Exception:
+                    vina_aff = None
+
+            # Combine all poses into one SDF string
+            from rdkit.Chem import SDWriter
+            sdf_str = ""
+            tmp_sdf_all = os.path.join(td, "all.sdf")
+            w = SDWriter(tmp_sdf_all)
+            for p in poses: w.write(p)
+            w.close()
+            with open(tmp_sdf_all, "r") as f:
+                sdf_str = f.read()
+            sdf_b64 = base64.b64encode(sdf_str.encode("utf-8")).decode("ascii")
+
+            return jsonify({
+                "vina_affinity_kcal_mol": vina_aff,
+                "modes_returned": len(poses),
+                "poses_sdf_b64": sdf_b64,
+                "receptor": "hERG 8ZYP (prepared via Meeko)",
+                "autobox_ref": os.path.basename(REF_LIG_PDB)
+            })
+
+    except FileNotFoundError as e:
+        # Likely missing 'smina' or meeko CLIs in PATH
+        return jsonify({"error": f"Dependency missing: {e}"}), 500
     except Exception as e:
-        logger.exception("hERG quickscore error")
+        logger.exception("hERG smina error")
         return jsonify({"error": str(e)}), 500
 # ============================================================================ #
+
 
 
 
