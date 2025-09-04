@@ -77,10 +77,10 @@ def predict():
 # RDKit-only hERG demo scorer (no external tools)
 # ──────────────────────────────────────────────────────────────────────────────
 HERG_BLOCKERS = [
-    ("Dofetilide",  "COc1cc(ccc1OCCN(CCN(C)C)C)c2ccc(F)cc2"),
-    ("Terfenadine", "CC(C)(C)OC(C1=CC=CC=C1)C(O)(C2=CC=CC=C2)CCN(C)C"),
-    ("Astemizole",  "COCCOc1ccc(cc1)C(CN(C)CCC2=NC3=CC=CC=C3N2C)=NC4=CC=CC=C4"),
-    ("Cisapride",   "CCN(CC)CCOC(=O)C1=CC=CC(=C1)C(=O)NCCOC2=CC=CC=C2Cl"),
+    ("Dofetilide",  "CN(CCC1=CC=C(C=C1)NS(=O)(=O)C)CCOC2=CC=C(C=C2)NS(=O)(=O)C"),
+    ("Terfenadine", "CC(C)(C)C1=CC=C(C=C1)C(CCCN2CCC(CC2)C(C3=CC=CC=C3)(C4=CC=CC=C4)O)O"),
+    ("Astemizole",  "COc1ccc(CCN2CCC(CC2)Nc1nc2c(n1Cc1ccc(cc1)F)cccc2)cc1"),
+    ("Cisapride",   "Clc1cc(c(OC)cc1N)C(=O)NC3CCN(CCCOc2ccc(F)cc2)CC3OC"),
 ]
 
 def fp_morgan(smiles, radius=2, nBits=2048):
