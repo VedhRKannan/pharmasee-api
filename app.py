@@ -18,8 +18,21 @@ logger = logging.getLogger(__name__)
 
 # ✅ Create the Flask app
 app = Flask(__name__)
+@app.route("/routes", methods=["GET"])
+def list_routes():
+    # list every rule the server is actually serving right now
+    return jsonify(sorted([str(r) for r in app.url_map.iter_rules()]))
 
-# ===================== ML MODELS (unchanged) =====================
+@app.route("/herg_vina_stub", methods=["POST","GET"])
+def herg_vina_stub():
+    # quick proof the deploy picked up new code
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+    else:
+        data = {"note": "GET ok"}
+    return jsonify({"ok": True, "echo": data}), 200
+
+# ===================== ML MODELS =====================
 models = {}
 model_names = ["lipophilicity (logD)", "solubility (logS)"]
 
