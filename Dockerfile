@@ -1,28 +1,25 @@
-# Use slim Python base
 FROM python:3.11-slim
 
-# Install system deps for RDKit & docking tools
+# install dependencies
 RUN apt-get update && apt-get install -y \
     build-essential \
-    curl \
-    wget \
-    git \
-    libgl1 \
+    git wget curl \
+    libeigen3-dev \
     openbabel \
-    && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/*
 
-# Install Python deps
+# clone and build smina from source
+RUN git clone https://github.com/mwojcikowski/smina.git /opt/smina \
+ && cd /opt/smina \
+ && mkdir build && cd build \
+ && cmake .. \
+ && make -j$(nproc) \
+ && cp smina /usr/local/bin/smina
+
+# python deps
+RUN pip install flask rdkit-pypi joblib numpy biopython
+
 WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY . /app
 
-# Install smina (static build)
-RUN curl -L -o /tmp/smina.static https://github.com/ccsb-scripps/smina/releases/download/rel-2020-12-10/smina.static \
- && chmod +x /tmp/smina.static \
- && mv /tmp/smina.static /usr/local/bin/smina
-
-# Copy app code
-COPY . .
-
-EXPOSE 8080
 CMD ["python", "app.py"]
