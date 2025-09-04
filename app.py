@@ -20,15 +20,20 @@ app = Flask(__name__)
 # ──────────────────────────────────────────────────────────────────────────────
 # Load ML models for /predict
 # ──────────────────────────────────────────────────────────────────────────────
-models = {}
+models = None
 model_names = ["lipophilicity (logD)", "solubility (logS)"]
-try:
+
+def get_models():
+    global models
+    if models is not None:
+        return models
+    loaded = {}
     for name in model_names:
-        model_path = os.path.join("saved_models", f"{name}.pkl")
-        models[name] = joblib.load(model_path)
-    logger.info("✅ Models loaded successfully.")
-except Exception as e:
-    logger.error(f"❌ Failed to load models: {e}")
+        path = os.path.join("saved_models", f"{name}.pkl")
+        loaded[name] = joblib.load(path)
+    logging.getLogger(__name__).info("✅ Models loaded (lazy).")
+    models = loaded
+    return models
 
 def mol_to_fp(smiles, radius=2, nBits=1024):
     """Morgan fingerprint as numpy array for sklearn models."""
@@ -49,28 +54,24 @@ def home():
 
 @app.route("/predict", methods=["POST"])
 def predict():
-    """
-    Body: { "smiles": "..." }
-    Returns: { "lipophilicity (logD)": float, "solubility (logS)": float }
-    """
     try:
         data = request.get_json(force=True) or {}
         smiles = (data.get("smiles") or "").strip()
         if not smiles:
             return jsonify({"error": "No SMILES provided"}), 400
-
         if Chem.MolFromSmiles(smiles) is None:
             return jsonify({"error": "Invalid SMILES format"}), 400
 
-        predictions = {}
-        fp = mol_to_fp(smiles)
-        for name, model in models.items():
-            predictions[name] = float(model.predict([fp])[0])
+        mdl = get_models()  # <-- load once on first call
 
+        fp = mol_to_fp(smiles)
+        predictions = { name: float(model.predict([fp])[0]) for name, model in mdl.items() }
         return jsonify(predictions)
     except Exception as e:
         logger.exception("❌ Error processing prediction")
         return jsonify({"error": str(e)}), 500
+
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # RDKit-only hERG demo scorer (no external tools)
