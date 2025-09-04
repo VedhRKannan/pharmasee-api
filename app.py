@@ -167,7 +167,13 @@ def ensure_receptor_prepared_vina(ligand_resn=None):
 
     # 3) Prepare receptor & (if present) ref ligand to PDBQT
     if not os.path.exists(REC_PDBQT):
-        _run(["mk_prepare_receptor.py", "-i", REC_PDB, "-o", REC_PDBQT, "-U", "waters"])
+        _run([
+    "mk_prepare_receptor.py",
+    "--read_pdb", REC_PDB,          # read plain PDB/ENT (no ProDy/MMCIF)
+    "-p", REC_PDBQT,                # write PDBQT to this exact filename
+    "--delete_residues", "HOH,WAT", # strip waters
+    "-a"                            # allow missing residues/altloc issues
+])
     if have_ref and not os.path.exists(REF_LIG_PDBQT):
         _run(["mk_prepare_ligand.py", "-i", REF_LIG_PDB, "-o", REF_LIG_PDBQT])
 
