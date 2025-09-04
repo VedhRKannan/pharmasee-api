@@ -259,7 +259,7 @@ def herg_vina():
             return jsonify({"error": "No SMILES provided"}), 400
 
         # Dependency check (clear JSON if missing)
-        missing = [exe for exe in ("smina", "mk_prepare_ligand.py", "mk_prepare_receptor.py")
+        missing = [exe for exe in ("smina", "obabel")
                    if which(exe) is None]
         if missing:
             return jsonify({"error": f"Dependency missing: {', '.join(missing)} not found in PATH"}), 500
