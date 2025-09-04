@@ -1,3 +1,4 @@
+# app.py
 from flask import Flask, request, jsonify
 import joblib
 import numpy as np
@@ -16,23 +17,14 @@ RDLogger.DisableLog("rdApp.*")
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ✅ Create the Flask app
+# ──────────────────────────────────────────────────────────────────────────────
+# Flask app
+# ──────────────────────────────────────────────────────────────────────────────
 app = Flask(__name__)
-@app.route("/routes", methods=["GET"])
-def list_routes():
-    # list every rule the server is actually serving right now
-    return jsonify(sorted([str(r) for r in app.url_map.iter_rules()]))
 
-@app.route("/herg_vina_stub", methods=["POST","GET"])
-def herg_vina_stub():
-    # quick proof the deploy picked up new code
-    if request.method == "POST":
-        data = request.get_json(silent=True) or {}
-    else:
-        data = {"note": "GET ok"}
-    return jsonify({"ok": True, "echo": data}), 200
-
-# ===================== ML MODELS =====================
+# ──────────────────────────────────────────────────────────────────────────────
+# ML models (your existing predict)
+# ──────────────────────────────────────────────────────────────────────────────
 models = {}
 model_names = ["lipophilicity (logD)", "solubility (logS)"]
 
@@ -82,12 +74,16 @@ def predict():
         logger.exception("❌ Error processing prediction")
         return jsonify({"error": str(e)}), 500
 
-# ===================== hERG DOCKING (SMINA/Vina) =====================
+# ──────────────────────────────────────────────────────────────────────────────
+# hERG docking via SMINA (Vina) using PDB 9CHQ for autobox (with robust fallbacks)
+# ──────────────────────────────────────────────────────────────────────────────
 import subprocess, tempfile, base64, urllib.request
 
 DOCK_VINA_ROOT = os.path.abspath("./herg_vina_assets")
 os.makedirs(DOCK_VINA_ROOT, exist_ok=True)
-REC_PDB       = os.path.join(DOCK_VINA_ROOT, "8ZYP.pdb")
+
+# Use 9CHQ as primary receptor source (co-crystal ligand present)
+REC_PDB       = os.path.join(DOCK_VINA_ROOT, "9CHQ.pdb")     # we write any downloaded legacy/ent as this file name
 REC_PDBQT     = os.path.join(DOCK_VINA_ROOT, "herg_rec.pdbqt")
 REF_LIG_PDB   = os.path.join(DOCK_VINA_ROOT, "ref_ligand.pdb")
 REF_LIG_PDBQT = os.path.join(DOCK_VINA_ROOT, "ref_ligand.pdbqt")
@@ -114,31 +110,33 @@ def _try_download(urls, dest):
         raise last_err
     return False
 
-def ensure_receptor_prepared_vina():
+def ensure_receptor_prepared_vina(ligand_resn=None):
     """
-    Ensure we have a receptor PDB file with a co-crystal ligand for autoboxing.
-    Try 8ZYP first (E-4031-bound; may be mmCIF-only at RCSB, PDBe .ent works),
-    then fall back to 5VA1 (apo; we will error if no ligand is present).
+    Ensures a 9CHQ receptor is present & prepared.
+    - Downloads 9CHQ (tries RCSB .pdb then PDBe .ent); if all fail, falls back to 5VA1.
+    - Extracts a co-crystal ligand (largest HET group by default, or specific RESN if provided).
+    - Prepares receptor and ligand to PDBQT via Meeko.
+    Returns dict with:
+      { "have_ref_ligand": bool, "receptor_file": REC_PDB, "ligand_resn": <str|None> }
     """
-    # 1) Download receptor file once (prefer 8ZYP)
+    # 1) Download receptor once (prefer 9CHQ)
     if not os.path.exists(REC_PDB):
-        # Try multiple sources / formats for 8ZYP
         try:
             _try_download([
-                # RCSB legacy PDB often missing → 404
-                "https://files.rcsb.org/download/8ZYP.pdb",
-                # PDBe legacy-format .ent (works even when .pdb missing)
-                "https://www.ebi.ac.uk/pdbe/entry-files/download/pdb8zyp.ent",
-                # Fallback to 5VA1 (older hERG cryo-EM)
+                "https://files.rcsb.org/download/9CHQ.pdb",
+                "https://www.ebi.ac.uk/pdbe/entry-files/download/pdb9chq.ent",
+                # fallback to older hERG (apo) only if needed
                 "https://files.rcsb.org/download/5VA1.pdb",
                 "https://www.ebi.ac.uk/pdbe/entry-files/download/pdb5va1.ent",
             ], REC_PDB)
         except Exception as e:
-            raise RuntimeError(f"Failed to download receptor (8ZYP/5VA1): {e}")
+            raise RuntimeError(f"Failed to download receptor (9CHQ/5VA1): {e}")
 
-    # 2) Extract largest non-water HET as autobox reference
+    # 2) Try to extract a reference ligand (HET group) for autoboxing
+    have_ref = False
+    chosen_resn = None
     if not os.path.exists(REF_LIG_PDB):
-        het_by_res = {}
+        het_by_key = {}  # key = (resn, resid)
         with open(REC_PDB) as f:
             for ln in f:
                 if not ln.startswith("HETATM"):
@@ -146,28 +144,62 @@ def ensure_receptor_prepared_vina():
                 resn = ln[17:20].strip()
                 if resn in ("HOH","WAT","NA","K","CL","ZN","MG"):
                     continue
-                het_by_res.setdefault(resn, []).append(ln)
+                resid = ln[22:26].strip()
+                het_by_key.setdefault((resn, resid), []).append(ln)
 
-        if not het_by_res:
-            # If the receptor file has no ligand (e.g., apo 5VA1), we can’t autobox on a ligand
-            # → tell the client clearly so you can choose a fixed box or switch to GNINA later.
-            raise RuntimeError(
-                "No hetero ligand found in receptor file for autoboxing "
-                "(8ZYP/5VA1). Use a receptor with a bound blocker or switch to "
-                "a fixed box (center/size) strategy."
-            )
+        if het_by_key:
+            if ligand_resn:
+                candidates = [(k, v) for (k, v) in het_by_key.items() if k[0].upper() == str(ligand_resn).upper()]
+                if candidates:
+                    sel_key, lines = max(candidates, key=lambda kv: len(kv[1]))
+                    chosen_resn = sel_key[0]
+                else:
+                    sel_key, lines = max(het_by_key.items(), key=lambda kv: len(kv[1]))
+                    chosen_resn = sel_key[0]
+            else:
+                sel_key, lines = max(het_by_key.items(), key=lambda kv: len(kv[1]))
+                chosen_resn = sel_key[0]
 
-        resn_max = max(het_by_res, key=lambda k: len(het_by_res[k]))
-        with open(REF_LIG_PDB, "w") as out:
-            out.writelines(het_by_res[resn_max])
-            out.write("\nEND\n")
+            with open(REF_LIG_PDB, "w") as out:
+                out.writelines(lines)
+                out.write("\nEND\n")
+            have_ref = True
 
-    # 3) Prepare receptor & ref ligand to PDBQT (Meeko CLIs)
+    # 3) Prepare receptor & (if present) ref ligand to PDBQT
     if not os.path.exists(REC_PDBQT):
         _run(["mk_prepare_receptor.py", "-i", REC_PDB, "-o", REC_PDBQT, "-U", "waters"])
-    if not os.path.exists(REF_LIG_PDBQT):
+    if have_ref and not os.path.exists(REF_LIG_PDBQT):
         _run(["mk_prepare_ligand.py", "-i", REF_LIG_PDB, "-o", REF_LIG_PDBQT])
 
+    return {"have_ref_ligand": have_ref, "receptor_file": REC_PDB, "ligand_resn": chosen_resn}
+
+def compute_box_center_from_receptor(pdb_path):
+    """
+    Compute a rough docking box center from protein Cα atoms (fallback when no ligand).
+    Returns (cx, cy, cz) as floats.
+    """
+    xs, ys, zs = [], [], []
+    with open(pdb_path) as f:
+        for ln in f:
+            if ln.startswith("ATOM") and ln[12:16].strip() == "CA":
+                try:
+                    x = float(ln[30:38]); y = float(ln[38:46]); z = float(ln[46:54])
+                    xs.append(x); ys.append(y); zs.append(z)
+                except Exception:
+                    continue
+    if not xs:
+        with open(pdb_path) as f:
+            for ln in f:
+                if ln.startswith("ATOM"):
+                    try:
+                        x = float(ln[30:38]); y = float(ln[38:46]); z = float(ln[46:54])
+                        xs.append(x); ys.append(y); zs.append(z)
+                    except Exception:
+                        continue
+    if not xs:
+        raise RuntimeError("Could not compute receptor center (no ATOM records).")
+    cx = sum(xs)/len(xs); cy = sum(ys)/len(ys); cz = sum(zs)/len(zs)
+    return cx, cy, cz
 
 def smiles_to_rdkit_3d_min(smiles: str):
     mol = Chem.MolFromSmiles(smiles)
@@ -191,29 +223,66 @@ def rdkit_to_pdbqt_meeko(mol, out_path):
 @app.route("/herg_vina", methods=["POST"])
 def herg_vina():
     """
-    Body: { "smiles": "...", "exhaustiveness": 8, "num_modes": 9 }
-    Returns: { vina_affinity_kcal_mol, poses_sdf_b64, modes_returned, receptor, autobox_ref }
+    Body JSON:
+      {
+        "smiles": "...",                     # required
+        "exhaustiveness": 8,                 # optional (default 4 for speed)
+        "num_modes": 9,                      # optional (default 5)
+        "ligand_resn": "XXX",                # optional: choose specific HET RESN from 9CHQ to autobox on
+        "center": [cx,cy,cz], "size": [sx,sy,sz]  # optional: override fixed box
+      }
+    Returns JSON:
+      {
+        "vina_affinity_kcal_mol": float|null,
+        "modes_returned": int,
+        "poses_sdf_b64": "base64 SDF of all poses",
+        "receptor": "9CHQ.pdb",
+        "box_used": { "mode": "autobox_ligand" | "auto_center" | "fixed", ... }
+      }
     """
     try:
         data = request.get_json(force=True) or {}
         smiles = (data.get("smiles") or "").strip()
-        ex     = str(data.get("exhaustiveness") or "4")  # modest defaults while testing
+        ex     = str(data.get("exhaustiveness") or "4")  # modest defaults during testing
         modes  = str(data.get("num_modes") or "5")
+        user_center = data.get("center")
+        user_size   = data.get("size")
+        ligand_resn = data.get("ligand_resn")  # e.g., "E41", "LIG", etc.
+
         if not smiles:
             return jsonify({"error": "No SMILES provided"}), 400
 
-        # 🔎 Clear dependency check with explicit error (so you never get an empty response)
-        missing = [exe for exe in ("smina", "mk_prepare_ligand.py", "mk_prepare_receptor.py") if which(exe) is None]
+        # Dependency check (clear JSON if missing)
+        missing = [exe for exe in ("smina", "mk_prepare_ligand.py", "mk_prepare_receptor.py")
+                   if which(exe) is None]
         if missing:
             return jsonify({"error": f"Dependency missing: {', '.join(missing)} not found in PATH"}), 500
 
-        ensure_receptor_prepared_vina()
-        logger.info("Receptor in use: %s", REC_PDB)
-
+        prep = ensure_receptor_prepared_vina(ligand_resn=ligand_resn)
+        have_ref = bool(prep.get("have_ref_ligand"))
 
         lig3d = smiles_to_rdkit_3d_min(smiles)
         if lig3d is None:
             return jsonify({"error": "Failed to build 3D for SMILES"}), 400
+
+        # Decide autobox vs fixed box
+        box_used = {}
+        use_autobox = have_ref and not (user_center or user_size)
+
+        if user_center and user_size:
+            try:
+                cx, cy, cz = map(float, user_center)
+                sx, sy, sz = map(float, user_size)
+                box_used = {"mode": "fixed", "center": [cx, cy, cz], "size": [sx, sy, sz]}
+                use_autobox = False
+            except Exception:
+                return jsonify({"error": "Invalid center/size values; must be arrays of 3 numbers"}), 400
+
+        if not use_autobox and not box_used:
+            # No ref ligand available → compute a coarse center and use generous size
+            cx, cy, cz = compute_box_center_from_receptor(REC_PDB)
+            sx, sy, sz = 28.0, 28.0, 28.0
+            box_used = {"mode": "auto_center", "center": [cx, cy, cz], "size": [sx, sy, sz]}
 
         with tempfile.TemporaryDirectory() as td:
             lig_pdbqt = os.path.join(td, "ligand.pdbqt")
@@ -221,35 +290,44 @@ def herg_vina():
             out_sdf   = os.path.join(td, "out.sdf")
             log_txt   = os.path.join(td, "smina.log")
 
-            # Run smina with autobox around co-crystal ligand
             cmd = [
                 "smina",
                 "--receptor", REC_PDBQT,
                 "--ligand", lig_pdbqt,
-                "--autobox_ligand", REF_LIG_PDBQT,
                 "--exhaustiveness", ex,
                 "--num_modes", modes,
                 "--seed", "0",
                 "--out", out_sdf,
                 "--log", log_txt
             ]
+            if use_autobox:
+                cmd.extend(["--autobox_ligand", REF_LIG_PDBQT])
+                box_used = {"mode": "autobox_ligand", "ligand": os.path.basename(REF_LIG_PDB)}
+            else:
+                cx, cy, cz = box_used["center"]
+                sx, sy, sz = box_used["size"]
+                cmd.extend([
+                    "--center_x", str(cx), "--center_y", str(cy), "--center_z", str(cz),
+                    "--size_x", str(sx), "--size_y", str(sy), "--size_z", str(sz)
+                ])
+
             _run(cmd)
 
-            # Read poses
             from rdkit.Chem import SDMolSupplier, SDWriter
             suppl = SDMolSupplier(out_sdf, removeHs=False)
             poses = [m for m in suppl if m is not None]
             if not poses:
-                # include smina log in error for easier debugging
                 log_tail = ""
                 try:
                     with open(log_txt, "r") as lf:
                         log_tail = lf.read()[-2000:]
                 except Exception:
                     pass
-                return jsonify({"error": "Docking produced no poses", "dock_log_tail": log_tail}), 500
+                return jsonify({"error": "Docking produced no poses",
+                                "dock_log_tail": log_tail,
+                                "box_used": box_used}), 500
 
-            # Top pose affinity
+            # Best (first) pose affinity
             top = poses[0]
             vina_aff = None
             for key in ("minimizedAffinity", "affinity"):
@@ -273,16 +351,21 @@ def herg_vina():
                 "vina_affinity_kcal_mol": vina_aff,
                 "modes_returned": len(poses),
                 "poses_sdf_b64": sdf_b64,
-                "receptor": "hERG 8ZYP (prepared via Meeko)",
-                "autobox_ref": os.path.basename(REF_LIG_PDB)
+                "receptor": os.path.basename(REC_PDB),
+                "box_used": box_used
             })
 
     except Exception as e:
         logger.exception("hERG smina error")
-        # On any error, return structured JSON (so your Next proxy/browser never sees an empty body)
         return jsonify({"error": str(e)}), 500
 
-# Optional: quick dependency probe
+# ──────────────────────────────────────────────────────────────────────────────
+# Helpful debug endpoints (keep during bring-up)
+# ──────────────────────────────────────────────────────────────────────────────
+@app.route("/routes", methods=["GET"])
+def list_routes():
+    return jsonify(sorted([str(r) for r in app.url_map.iter_rules()]))
+
 @app.route("/herg_debug", methods=["GET"])
 def herg_debug():
     deps = {
@@ -296,7 +379,9 @@ def herg_debug():
     }
     return jsonify(deps)
 
-# ===============================================================
-
+# ──────────────────────────────────────────────────────────────────────────────
+# Entrypoint
+# ──────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    # For Railway; change port if your platform injects $PORT
     app.run(host="0.0.0.0", port=8080)
