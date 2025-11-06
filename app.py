@@ -88,6 +88,40 @@ def fp_morgan(smiles, radius=2, nBits=2048):
     if m is None: return None
     return AllChem.GetMorganFingerprintAsBitVect(m, radius, nBits=nBits)
 
+def smith_waterman_score(a: str, b: str, match: int = 2, mismatch: int = -1, gap: int = -2):
+    """
+    Smith–Waterman local alignment on raw strings (e.g., SMILES).
+    Returns (raw_score, normalized_score_in_[0,1]).
+    Normalization: raw_score / (match * min(len(a), len(b))) clipped to [0,1].
+    """
+    if not a or not b:
+        return 0.0, 0.0
+
+    la, lb = len(a), len(b)
+    # DP matrix (la+1) x (lb+1)
+    H = [[0] * (lb + 1) for _ in range(la + 1)]
+    best = 0
+
+    for i in range(1, la + 1):
+        ai = a[i - 1]
+        for j in range(1, lb + 1):
+            bj = b[j - 1]
+            s = match if ai == bj else mismatch
+            # Smith–Waterman recurrence
+            diag = H[i - 1][j - 1] + s
+            up   = H[i - 1][j] + gap
+            left = H[i][j - 1] + gap
+            H[i][j] = max(0, diag, up, left)
+            if H[i][j] > best:
+                best = H[i][j]
+
+    # Normalize to [0,1] by the max possible all-match local segment (shorter length)
+    denom = match * min(la, lb)
+    norm = float(best) / float(denom) if denom > 0 else 0.0
+    if norm < 0: norm = 0.0
+    if norm > 1: norm = 1.0
+    return float(best), norm
+
 @app.route("/herg_demo", methods=["POST"])
 def herg_demo():
     """
@@ -96,9 +130,9 @@ def herg_demo():
       {
         "ok": true,
         "logP": float,
-        "best_ref": {"name": str, "smiles": str, "tanimoto": float},
-        "similarities": [ {"name": str, "tanimoto": float}, ... ],
-        "affinity_demo_kcal_mol": float   # purely demo: -5 - 4*best_sim
+        "best_ref": {"name": str, "smiles": str, "sw_raw": float, "sw_norm": float},
+        "similarities": [ {"name": str, "sw_raw": float, "sw_norm": float}, ... ],
+        "affinity_demo_kcal_mol": float   # demo: -5 - 4*best_sw_norm
       }
     """
     try:
@@ -107,36 +141,38 @@ def herg_demo():
         if not smiles:
             return jsonify({"error": "No SMILES provided"}), 400
 
-        qfp = fp_morgan(smiles)
-        if qfp is None:
+        # Validate ligand SMILES early
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
             return jsonify({"error": "Invalid SMILES"}), 400
 
+        # Compute Smith–Waterman similarity to each reference SMILES (HERG_BLOCKERS)
         sims = []
-        best = {"name": None, "smiles": None, "tanimoto": 0.0}
+        best = {"name": None, "smiles": None, "sw_raw": 0.0, "sw_norm": 0.0}
         for name, s in HERG_BLOCKERS:
-            bfp = fp_morgan(s)
-            if bfp is None:
+            if not s:
                 continue
-            tan = DataStructs.TanimotoSimilarity(qfp, bfp)
-            sims.append({"name": name, "tanimoto": tan})
-            if tan > best["tanimoto"]:
-                best = {"name": name, "smiles": s, "tanimoto": tan}
+            sw_raw, sw_norm = smith_waterman_score(smiles, s, match=2, mismatch=-1, gap=-2)
+            sims.append({"name": name, "sw_raw": sw_raw, "sw_norm": sw_norm})
+            if sw_norm > best["sw_norm"]:
+                best = {"name": name, "smiles": s, "sw_raw": sw_raw, "sw_norm": sw_norm}
 
-        mol = Chem.MolFromSmiles(smiles)
+        # Context metric (unchanged)
         logP = float(Crippen.MolLogP(mol))
-        affinity_demo = float(-5.0 - 4.0 * best["tanimoto"])  # demo-only number
+
+        # Demo affinity: use SW normalized similarity instead of Tanimoto
+        affinity_demo = float(-5.0 - 4.0 * best["sw_norm"])
 
         return jsonify({
             "ok": True,
             "logP": logP,
             "best_ref": best,
             "similarities": sims,
-            "affinity_demo_kcal_mol": affinity_demo
+            "affinity_demo_kcal_mol": affinity
         })
     except Exception as e:
         logger.exception("herg_demo error")
         return jsonify({"error": str(e)}), 500
-
 # ──────────────────────────────────────────────────────────────────────────────
 # Entrypoint
 # ──────────────────────────────────────────────────────────────────────────────
