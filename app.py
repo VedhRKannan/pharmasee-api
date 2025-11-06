@@ -161,7 +161,7 @@ def herg_demo():
         logP = float(Crippen.MolLogP(mol))
 
         # Demo affinity: use SW normalized similarity instead of Tanimoto
-        affinity_demo = float(-5.0 - 4.0 * best["sw_norm"])
+        affinity = float(-5.0 - 4.0 * best["sw_norm"])
 
         return jsonify({
             "ok": True,
